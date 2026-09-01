@@ -25,14 +25,30 @@ public final class TokenBucketRateLimiter implements RateLimiter {
         }
     }
 
-    private final TokenBucketConfig config;
+    private final int capacity;
+    private final int tokensPerSecond;
+    private final long refillIntervalMs;
     private final ConcurrentHashMap<String, ClientBucket> buckets;
     private final AtomicLong totalRequests = new AtomicLong(0);
     private final AtomicLong allowedRequests = new AtomicLong(0);
     private final AtomicLong rejectedRequests = new AtomicLong(0);
 
-    public TokenBucketRateLimiter(TokenBucketConfig config) {
-        this.config = config;
+    /**
+     * Creates a token bucket rate limiter.
+     *
+     * @param capacity maximum number of tokens in the bucket
+     * @param tokensPerSecond rate at which tokens are refilled per second
+     */
+    public TokenBucketRateLimiter(int capacity, int tokensPerSecond) {
+        if (capacity <= 0) {
+            throw new IllegalArgumentException("Capacity must be positive");
+        }
+        if (tokensPerSecond <= 0) {
+            throw new IllegalArgumentException("tokensPerSecond must be positive");
+        }
+        this.capacity = capacity;
+        this.tokensPerSecond = tokensPerSecond;
+        this.refillIntervalMs = 1000L / tokensPerSecond;
         this.buckets = new ConcurrentHashMap<>();
     }
 
@@ -51,7 +67,7 @@ public final class TokenBucketRateLimiter implements RateLimiter {
         }
 
         totalRequests.incrementAndGet();
-        ClientBucket bucket = buckets.computeIfAbsent(clientId, _ -> new ClientBucket(config.getCapacity()));
+        ClientBucket bucket = buckets.computeIfAbsent(clientId, _ -> new ClientBucket(capacity));
 
         bucket.lock.writeLock().lock();
         try {
@@ -81,7 +97,7 @@ public final class TokenBucketRateLimiter implements RateLimiter {
         if (bucket != null) {
             bucket.lock.writeLock().lock();
             try {
-                bucket.tokens = config.getCapacity();
+                bucket.tokens = capacity;
                 bucket.lastRefillTime = System.nanoTime();
             } finally {
                 bucket.lock.writeLock().unlock();
@@ -108,8 +124,8 @@ public final class TokenBucketRateLimiter implements RateLimiter {
         long elapsedNanos = now - bucket.lastRefillTime;
         long elapsedMs = elapsedNanos / 1_000_000;
 
-        double tokensToAdd = (elapsedMs / (double) config.getRefillIntervalMs()) * 1;
-        bucket.tokens = Math.min(config.getCapacity(), bucket.tokens + tokensToAdd);
+        double tokensToAdd = (elapsedMs / (double) refillIntervalMs) * 1;
+        bucket.tokens = Math.min(capacity, bucket.tokens + tokensToAdd);
         bucket.lastRefillTime = now;
     }
 
@@ -120,6 +136,6 @@ public final class TokenBucketRateLimiter implements RateLimiter {
     private long calculateRetryAfter(ClientBucket bucket, int requestedTokens) {
         double tokensNeeded = requestedTokens - bucket.tokens;
         double refillsNeeded = Math.ceil(tokensNeeded);
-        return (long) (refillsNeeded * config.getRefillIntervalMs());
+        return (long) (refillsNeeded * refillIntervalMs);
     }
 }
